@@ -6,8 +6,9 @@ from aiogram.types import FSInputFile
 from aiogram.filters import Command
 import asyncio
 import os
+from aiohttp import web
 
-TOKEN = os.getenv("TOKEN")  # токен телеграм-бота из Render Environment
+TOKEN = os.getenv("TOKEN")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -21,7 +22,6 @@ def load_mapping():
     mapping = {}
 
     for row in ws.iter_rows(min_row=2, values_only=True):
-        # Берём только первые 3 значения, даже если в Excel больше колонок
         productName, gtin, ntin = row[:3]
 
         if productName:
@@ -74,24 +74,18 @@ def process_xml_with_cdata(xml_text: str) -> str:
         name = name_el.text.strip()
 
         if name in mapping:
-            gtin_value = mapping[name]["gtin"]
-            ntin_value = mapping[name]["ntin"]
-
-            # Добавляем перенос строки
             gtin_el = ET.SubElement(p, "gtin")
-            gtin_el.text = gtin_value
+            gtin_el.text = mapping[name]["gtin"]
 
             ntin_el = ET.SubElement(p, "ntin")
-            ntin_el.text = ntin_value
+            ntin_el.text = mapping[name]["ntin"]
 
-    # Красиво отформатировать XML
     indent(inner_root)
-
     updated_inner_xml = ET.tostring(inner_root, encoding="unicode")
 
     updated_cdata = f"<![CDATA[\n{updated_inner_xml}\n]]>"
-
     final_xml = re.sub(cdata_pattern, updated_cdata, xml_text, flags=re.DOTALL)
+
     return final_xml
 
 
@@ -116,13 +110,27 @@ async def handle_xml(message: types.Message):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(updated_xml)
 
-    await message.answer_document(
-        FSInputFile(output_path),
-        caption="Готово! Обновлённый XML:"
-    )
+    await message.answer_document(FSInputFile(output_path), caption="Готово! Обновлённый XML:")
 
 
+# ---------- AIOHTTP SERVER (для Render) ----------
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    port = int(os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+
+# ---------- MAIN ----------
 async def main():
+    await start_web_server()
     await dp.start_polling(bot)
 
 
