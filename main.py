@@ -138,4 +138,36 @@ async def handle_xml(message: types.Message):
         await message.answer(f"Ошибка: {e}")
         return
 
-    output_path = "updated.xml"_
+    output_path = "updated.xml"
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(updated_xml)
+
+    await message.answer_document(FSInputFile(output_path), caption="Готово! Обновлённый XML:")
+
+
+# ------------------ WEB SERVER ДЛЯ RENDER (FREE) ------------------
+async def handle(request):
+    return web.Response(text="Bot is running.")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+
+    port = int(os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+
+# ------------------ MAIN ------------------
+async def main():
+    await start_web_server()   # важно для Render Free
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
