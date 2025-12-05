@@ -7,36 +7,57 @@ from aiogram.filters import Command
 import asyncio
 import os
 
-TOKEN = os.getenv("TOKEN")  # токен из Render Environment
+TOKEN = os.getenv("TOKEN")  # токен телеграм-бота из Render Environment
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
-# Загружаем Excel в память
+# ---------- ЧТЕНИЕ EXCEL ----------
 def load_mapping():
     wb = openpyxl.load_workbook("gtin.xlsx")
     ws = wb.active
 
     mapping = {}
+
     for row in ws.iter_rows(min_row=2, values_only=True):
-        productName, gtin, ntin = row
-        mapping[str(productName).strip()] = {
-            "gtin": str(gtin),
-            "ntin": str(ntin)
-        }
+        # Берём только первые 3 значения, даже если в Excel больше колонок
+        productName, gtin, ntin = row[:3]
+
+        if productName:
+            mapping[str(productName).strip()] = {
+                "gtin": str(gtin) if gtin else "",
+                "ntin": str(ntin) if ntin else ""
+            }
+
     return mapping
 
 
 mapping = load_mapping()
 
 
+# ---------- КРАСИВОЕ ФОРМАТИРОВАНИЕ XML ----------
+def indent(elem, level=0):
+    i = "\n" + level * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        for child in elem:
+            indent(child, level + 1)
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = i
+
+
+# ---------- ОБРАБОТКА CDATA И ДОБАВЛЕНИЕ GTIN/NTIN ----------
 def process_xml_with_cdata(xml_text: str) -> str:
     cdata_pattern = r"<!\[CDATA\[(.*)\]\]>"
     match = re.search(cdata_pattern, xml_text, re.DOTALL)
 
     if not match:
-        raise ValueError("В исходном файле нет CDATA с вложенным XML.")
+        raise ValueError("В файле нет CDATA со вложенным XML.")
 
     inner_xml = match.group(1).strip()
 
@@ -53,23 +74,28 @@ def process_xml_with_cdata(xml_text: str) -> str:
         name = name_el.text.strip()
 
         if name in mapping:
-            gtin_el = ET.Element("gtin")
-            gtin_el.text = mapping[name]["gtin"]
-            p.append(gtin_el)
+            gtin_value = mapping[name]["gtin"]
+            ntin_value = mapping[name]["ntin"]
 
-            ntin_el = ET.Element("ntin")
-            ntin_el.text = mapping[name]["ntin"]
-            p.append(ntin_el)
+            # Добавляем перенос строки
+            gtin_el = ET.SubElement(p, "gtin")
+            gtin_el.text = gtin_value
+
+            ntin_el = ET.SubElement(p, "ntin")
+            ntin_el.text = ntin_value
+
+    # Красиво отформатировать XML
+    indent(inner_root)
 
     updated_inner_xml = ET.tostring(inner_root, encoding="unicode")
 
     updated_cdata = f"<![CDATA[\n{updated_inner_xml}\n]]>"
 
     final_xml = re.sub(cdata_pattern, updated_cdata, xml_text, flags=re.DOTALL)
-
     return final_xml
 
 
+# ---------- TELEGRAM BOT ----------
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Отправьте XML-файл — я добавлю внутрь GTIN и NTIN.")
@@ -90,7 +116,10 @@ async def handle_xml(message: types.Message):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(updated_xml)
 
-    await message.answer_document(FSInputFile(output_path), caption="Готово! Ваш файл обновлён.")
+    await message.answer_document(
+        FSInputFile(output_path),
+        caption="Готово! Обновлённый XML:"
+    )
 
 
 async def main():
