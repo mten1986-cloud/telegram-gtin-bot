@@ -74,19 +74,30 @@ def process_xml_with_cdata(xml_text: str) -> str:
         gtin = mapping[name]["gtin"]
         ntin = mapping[name]["ntin"]
 
-        # Вставляем перед </product> с сохранением форматирования
+        # ---- вычисляем отступы ----
+        # отступ перед </product>
+        m_indent = re.search(r"(\s*)</product>", product_block)
+        indent = m_indent.group(1) if m_indent else ""
+
+        # отступ для внутренних тегов: на один уровень глубже
+        inner_indent = indent + "    "
+
+        # ---- вставляем gtin/ntin с правильными отступами ----
         updated = re.sub(
             r"</product>",
-            f"    <gtin>{gtin}</gtin>\n    <ntin>{ntin}</ntin>\n</product>",
+            f"{inner_indent}<gtin>{gtin}</gtin>\n"
+            f"{inner_indent}<ntin>{ntin}</ntin>\n"
+            f"{indent}</product>",
             product_block
         )
+
         return updated
 
     # ---- МЕНЯЕМ ТОЛЬКО PRODUCT ----
     product_pattern = r"(<product[\s\S]*?</product>)"
     updated_inner_xml = re.sub(product_pattern, lambda m: replace_product(m), inner_xml)
 
-    # ---- ЗАМЕНЯЕМ CDATA ----
+    # ---- СОБИРАЕМ НОВУЮ CDATA ----
     updated_cdata = f"<![CDATA[{updated_inner_xml}]]>"
     final_xml = re.sub(cdata_pattern, updated_cdata, xml_text_no_decl, flags=re.DOTALL)
 
@@ -102,7 +113,7 @@ def process_xml_with_cdata(xml_text: str) -> str:
 # ---------------------------------------------------------
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Отправьте XML-файл — я добавлю GTIN и NTIN только внутрь <product>.")
+    await message.answer("Отправьте XML-файл — я добавлю GTIN и NTIN внутрь <product>.")
 
 
 @dp.message(lambda msg: msg.document and msg.document.file_name.endswith(".xml"))
@@ -110,25 +121,25 @@ async def handle_xml(message: types.Message):
 
     original_filename = message.document.file_name  # сохраняем имя файла
 
-    # скачиваем
+    # скачиваем файл
     file = await bot.download(message.document)
     xml_text = file.read().decode("utf-8")
 
-    # обрабатываем
+    # обрабатываем XML
     try:
         updated_xml = process_xml_with_cdata(xml_text)
     except Exception as e:
         await message.answer(f"Ошибка обработки XML: {e}")
         return
 
-    # сохраняем под тем же ИМЕНЕМ
+    # сохраняем с тем же именем
     with open(original_filename, "w", encoding="utf-8") as f:
         f.write(updated_xml)
 
-    # отправляем пользователю тот же файл
+    # отправляем обратно под тем же именем
     await message.answer_document(
         FSInputFile(original_filename),
-        caption="Готово! Обновлённый XML."
+        caption="Готово! Обновлённый файл."
     )
 
 
@@ -154,9 +165,10 @@ async def start_web_server():
 #                        MAIN
 # ---------------------------------------------------------
 async def main():
-    await start_web_server()   # важно!
+    await start_web_server()   # важно для Render Free
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
