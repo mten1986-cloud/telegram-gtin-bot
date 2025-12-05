@@ -1,6 +1,5 @@
 import openpyxl
 import re
-import xml.etree.ElementTree as ET
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import FSInputFile
 from aiogram.filters import Command
@@ -8,16 +7,15 @@ import asyncio
 import os
 from aiohttp import web
 
-# ✔ Сохраняем namespace v1 для корректного вывода
-ET.register_namespace("v1", "v1.snt")
-
 TOKEN = os.getenv("TOKEN")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
-# ------------------ ЧТЕНИЕ EXCEL ------------------
+# ---------------------------------------------------------
+#                 ЧТЕНИЕ EXCEL МАППИНГА
+# ---------------------------------------------------------
 def load_mapping():
     wb = openpyxl.load_workbook("gtin.xlsx")
     ws = wb.active
@@ -39,79 +37,57 @@ def load_mapping():
 mapping = load_mapping()
 
 
-# ------------------ XML FORMATTER ------------------
-def indent(elem, level=0):
-    """Красивое форматирование XML"""
-    i = "\n" + level * "  "
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = i + "  "
-        for child in elem:
-            indent(child, level + 1)
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-    else:
-        if level and (not elem.tail or not elem.tail.strip()):
-            elem.tail = i
-
-
-# ------------------ ОБРАБОТКА XML ------------------
+# ---------------------------------------------------------
+#       ОБРАБОТКА ТОЛЬКО <product>...</product>
+# ---------------------------------------------------------
 def process_xml_with_cdata(xml_text: str) -> str:
-
     # ---- СОХРАНЯЕМ XML-ДЕКЛАРАЦИЮ ----
     xml_decl = ""
     if xml_text.strip().startswith("<?xml"):
-        end_decl = xml_text.find("?>") + 2
-        xml_decl = xml_text[:end_decl].strip()
-        xml_text_no_decl = xml_text[end_decl:].lstrip()
+        end = xml_text.find("?>") + 2
+        xml_decl = xml_text[:end].strip()
+        xml_text_no_decl = xml_text[end:].lstrip()
     else:
         xml_text_no_decl = xml_text
 
     # ---- ИЗВЛЕКАЕМ CDATA ----
     cdata_pattern = r"<!\[CDATA\[(.*)\]\]>"
     match = re.search(cdata_pattern, xml_text_no_decl, re.DOTALL)
-
     if not match:
-        raise ValueError("В файле нет CDATA со вложенным XML.")
+        raise ValueError("CDATA не найден.")
 
-    inner_xml = match.group(1).strip()
+    inner_xml = match.group(1)
 
-    # ---- ПАРСИМ ВНУТРЕННИЙ XML ----
-    root = ET.fromstring(inner_xml)
+    # ---- ФУНКЦИЯ ДЛЯ ИЗМЕНЕНИЯ ОДНОГО PRODUCT ----
+    def replace_product(block):
+        product_block = block.group(1)
 
-    # namespace
-    ns = {"v1": "v1.snt"}
+        # Ищем productName
+        m = re.search(r"<productName>(.*?)</productName>", product_block, re.DOTALL)
+        if not m:
+            return product_block
 
-    # Находим <product>
-    products = root.findall(".//product", ns) or root.findall(".//product")
+        name = m.group(1).strip()
+        if name not in mapping:
+            return product_block
 
-    # ---- ДОБАВЛЯЕМ GTIN/NTIN ----
-    for p in products:
-        name_el = p.find("productName")
-        if not name_el:
-            continue
+        gtin = mapping[name]["gtin"]
+        ntin = mapping[name]["ntin"]
 
-        name = name_el.text.strip()
+        # Вставляем перед </product> с сохранением форматирования
+        updated = re.sub(
+            r"</product>",
+            f"    <gtin>{gtin}</gtin>\n    <ntin>{ntin}</ntin>\n</product>",
+            product_block
+        )
+        return updated
 
-        if name in mapping:
-            gtin_el = ET.SubElement(p, "gtin")
-            gtin_el.text = mapping[name]["gtin"]
+    # ---- МЕНЯЕМ ТОЛЬКО PRODUCT ----
+    product_pattern = r"(<product[\s\S]*?</product>)"
+    updated_inner_xml = re.sub(product_pattern, lambda m: replace_product(m), inner_xml)
 
-            ntin_el = ET.SubElement(p, "ntin")
-            ntin_el.text = mapping[name]["ntin"]
-
-    # ---- ФОРМАТИРУЕМ ----
-    indent(root)
-
-    # Получаем XML как строку
-    updated_inner_xml = ET.tostring(root, encoding="unicode")
-
-    # ---- ВОССТАНАВЛИВАЕМ ПРЕФИКС v1 ----
-    updated_inner_xml = updated_inner_xml.replace("ns0:", "v1:")
-    updated_inner_xml = updated_inner_xml.replace('xmlns:ns0="v1.snt"', 'xmlns:v1="v1.snt"')
-
-    # ---- ВСТАВЛЯЕМ ОБРАТНО В CDATA ----
-    updated_cdata = f"<![CDATA[\n{updated_inner_xml}\n]]>"
+    # ---- ЗАМЕНЯЕМ CDATA ----
+    updated_cdata = f"<![CDATA[{updated_inner_xml}]]>"
     final_xml = re.sub(cdata_pattern, updated_cdata, xml_text_no_decl, flags=re.DOTALL)
 
     # ---- ВОССТАНАВЛИВАЕМ XML-ДЕКЛАРАЦИЮ ----
@@ -121,31 +97,44 @@ def process_xml_with_cdata(xml_text: str) -> str:
     return final_xml
 
 
-# ------------------ TELEGRAM BOT ------------------
+# ---------------------------------------------------------
+#                   TELEGRAM BOT HANDLERS
+# ---------------------------------------------------------
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Отправьте XML-файл — я добавлю внутрь GTIN и NTIN.")
+    await message.answer("Отправьте XML-файл — я добавлю GTIN и NTIN только внутрь <product>.")
 
 
 @dp.message(lambda msg: msg.document and msg.document.file_name.endswith(".xml"))
 async def handle_xml(message: types.Message):
-    file = await bot.download(message.document)
-    original_xml = file.read().decode("utf-8")
 
+    original_filename = message.document.file_name  # сохраняем имя файла
+
+    # скачиваем
+    file = await bot.download(message.document)
+    xml_text = file.read().decode("utf-8")
+
+    # обрабатываем
     try:
-        updated_xml = process_xml_with_cdata(original_xml)
+        updated_xml = process_xml_with_cdata(xml_text)
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"Ошибка обработки XML: {e}")
         return
 
-    output_path = "updated.xml"
-    with open(output_path, "w", encoding="utf-8") as f:
+    # сохраняем под тем же ИМЕНЕМ
+    with open(original_filename, "w", encoding="utf-8") as f:
         f.write(updated_xml)
 
-    await message.answer_document(FSInputFile(output_path), caption="Готово! Обновлённый XML:")
+    # отправляем пользователю тот же файл
+    await message.answer_document(
+        FSInputFile(original_filename),
+        caption="Готово! Обновлённый XML."
+    )
 
 
-# ------------------ WEB SERVER ДЛЯ RENDER (FREE) ------------------
+# ---------------------------------------------------------
+#      ВЕБ-СЕРВЕР ДЛЯ RENDER (БЕСПЛАТНЫЙ ТАРИФ)
+# ---------------------------------------------------------
 async def handle(request):
     return web.Response(text="Bot is running.")
 
@@ -157,17 +146,17 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
-
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
 
-# ------------------ MAIN ------------------
+# ---------------------------------------------------------
+#                        MAIN
+# ---------------------------------------------------------
 async def main():
-    await start_web_server()   # важно для Render Free
+    await start_web_server()   # важно!
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
