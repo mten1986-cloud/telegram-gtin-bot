@@ -1,4 +1,4 @@
-import pandas as pd
+import openpyxl
 import re
 import xml.etree.ElementTree as ET
 from aiogram import Bot, Dispatcher, types
@@ -7,24 +7,31 @@ from aiogram.filters import Command
 import asyncio
 import os
 
-TOKEN = os.getenv("TOKEN")  # токен из переменных окружения на Render
+TOKEN = os.getenv("TOKEN")  # токен из Render Environment
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Загружаем Excel файл (лежит в той же директории, где main.py)
-mapping = pd.read_excel("gtin.xlsx")
-mapping.columns = ["productName", "gtin", "ntin"]
+
+# Загружаем Excel в память
+def load_mapping():
+    wb = openpyxl.load_workbook("gtin.xlsx")
+    ws = wb.active
+
+    mapping = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        productName, gtin, ntin = row
+        mapping[str(productName).strip()] = {
+            "gtin": str(gtin),
+            "ntin": str(ntin)
+        }
+    return mapping
+
+
+mapping = load_mapping()
 
 
 def process_xml_with_cdata(xml_text: str) -> str:
-    """
-    1) Находит CDATA с внутренним XML
-    2) Извлекает XML
-    3) Добавляет gtin и ntin в каждый <product>
-    4) Собирает XML обратно
-    """
-
     cdata_pattern = r"<!\[CDATA\[(.*)\]\]>"
     match = re.search(cdata_pattern, xml_text, re.DOTALL)
 
@@ -33,7 +40,6 @@ def process_xml_with_cdata(xml_text: str) -> str:
 
     inner_xml = match.group(1).strip()
 
-    # Парсим внутренний XML
     inner_tree = ET.ElementTree(ET.fromstring(inner_xml))
     inner_root = inner_tree.getroot()
 
@@ -45,15 +51,14 @@ def process_xml_with_cdata(xml_text: str) -> str:
             continue
 
         name = name_el.text.strip()
-        row = mapping[mapping["productName"] == name]
 
-        if not row.empty:
+        if name in mapping:
             gtin_el = ET.Element("gtin")
-            gtin_el.text = str(row.iloc[0]["gtin"])
+            gtin_el.text = mapping[name]["gtin"]
             p.append(gtin_el)
 
             ntin_el = ET.Element("ntin")
-            ntin_el.text = str(row.iloc[0]["ntin"])
+            ntin_el.text = mapping[name]["ntin"]
             p.append(ntin_el)
 
     updated_inner_xml = ET.tostring(inner_root, encoding="unicode")
